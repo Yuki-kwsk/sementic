@@ -93,11 +93,11 @@ def main() -> None:
 
     view_sem, view_vic, view_adv = st.columns(3)
     with view_sem:
-        st.image(semantic_imgs[0], caption=f"Semantic sample (1/{len(semantic_imgs)})", use_container_width=True)
+        st.image(semantic_imgs[0], caption=f"Semantic sample (1/{len(semantic_imgs)})", width="stretch")
     with view_vic:
-        st.image(victim_img, caption="Victim", use_container_width=True)
+        st.image(victim_img, caption="Victim", width="stretch")
     with view_adv:
-        st.image(adv_img, caption="Attacked", use_container_width=True)
+        st.image(adv_img, caption="Attacked", width="stretch")
 
     st.json(losses)
 
