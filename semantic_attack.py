@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -74,7 +74,7 @@ class CLIPFeatureExtractor(torch.nn.Module):
 
 
 def semantic_attack(
-    semantic_img: Image.Image,
+    semantic_imgs: List[Image.Image],
     victim_img: Image.Image,
     config: AttackConfig,
     progress_cb=None,
@@ -86,12 +86,18 @@ def semantic_attack(
     victim_w, victim_h = victim_img.size
     target_size = (victim_h, victim_w)
     victim = _to_tensor(victim_img, target_size, device)
-    semantic = _to_tensor(semantic_img, target_size, device)
+    if len(semantic_imgs) == 0:
+        raise ValueError("At least one semantic image is required.")
+    semantic_tensors = [_to_tensor(img, target_size, device) for img in semantic_imgs]
     adv = victim.clone().detach().requires_grad_(True)
 
     optimizer = torch.optim.Adam([adv], lr=config.lr)
     with torch.no_grad():
-        semantic_feat = extractor.encode(semantic, config.clip_input_size)
+        semantic_feats = [
+            extractor.encode(semantic_tensor, config.clip_input_size)
+            for semantic_tensor in semantic_tensors
+        ]
+        semantic_feat = torch.stack(semantic_feats, dim=0).mean(dim=0)
 
     last_losses: Dict[str, float] = {}
     for step in range(1, config.steps + 1):
