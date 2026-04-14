@@ -45,3 +45,9 @@ The UI includes presets that set all optimization parameters at once:
 - `Fast Preview`: quick trial settings for iterative experiments
 
 You can apply a preset first, then fine-tune sliders manually.
+
+## CUDA / Device selection
+
+- `Compute device` can be selected from `cuda`, `auto`, `cpu`.
+- For GPU execution, install CUDA-enabled PyTorch builds.
+- If CUDA memory is tight, lower `Optimization max side` and `LPIPS input size`.

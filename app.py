@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 
 import streamlit as st
+import torch
 from PIL import Image
 
 from semantic_attack import AttackConfig, semantic_attack
@@ -11,6 +12,7 @@ from semantic_attack import AttackConfig, semantic_attack
 MAX_SEMANTIC_IMAGES = 10
 PRESET_NAME_KEY = "preset_name"
 PRESET_INIT_KEY = "preset_initialized"
+DEVICE_MODE_KEY = "device_mode"
 DEFAULT_PRESET_NAME = "Balanced (Recommended)"
 PRESET_VALUES = {
     "Balanced (Recommended)": {
@@ -23,6 +25,9 @@ PRESET_VALUES = {
         "lpips_weight": 0.5,
         "lpips_net": "alex",
         "tv_weight": 0.03,
+        "optimize_max_side": 1024,
+        "lpips_input_size": 256,
+        "mixed_precision": True,
     },
     "Semantic Strong": {
         "steps": 220,
@@ -34,6 +39,9 @@ PRESET_VALUES = {
         "lpips_weight": 0.3,
         "lpips_net": "alex",
         "tv_weight": 0.02,
+        "optimize_max_side": 896,
+        "lpips_input_size": 256,
+        "mixed_precision": True,
     },
     "Natural Strong": {
         "steps": 200,
@@ -45,6 +53,9 @@ PRESET_VALUES = {
         "lpips_weight": 0.9,
         "lpips_net": "vgg",
         "tv_weight": 0.05,
+        "optimize_max_side": 768,
+        "lpips_input_size": 224,
+        "mixed_precision": True,
     },
     "Fast Preview": {
         "steps": 80,
@@ -56,6 +67,9 @@ PRESET_VALUES = {
         "lpips_weight": 0.4,
         "lpips_net": "alex",
         "tv_weight": 0.02,
+        "optimize_max_side": 640,
+        "lpips_input_size": 192,
+        "mixed_precision": True,
     },
 }
 
@@ -76,6 +90,7 @@ def main() -> None:
     if PRESET_INIT_KEY not in st.session_state:
         st.session_state[PRESET_NAME_KEY] = DEFAULT_PRESET_NAME
         _apply_preset_values(DEFAULT_PRESET_NAME)
+        st.session_state[DEVICE_MODE_KEY] = "cuda"
         st.session_state[PRESET_INIT_KEY] = True
 
     col_l, col_r = st.columns(2)
@@ -113,6 +128,7 @@ def main() -> None:
     with c1:
         steps = st.slider("Optimization steps", 50, 400, step=10, key="steps")
         clip_input_size = st.select_slider("CLIP input size", options=[224, 336], key="clip_input_size")
+        device_mode = st.selectbox("Compute device", options=["cuda", "auto", "cpu"], key=DEVICE_MODE_KEY)
     with c2:
         eps_255 = st.slider("Perturbation bound eps (1/255)", 2, 30, step=1, key="eps_255")
         semantic_weight = st.slider("Semantic weight", 0.1, 3.0, step=0.1, key="semantic_weight")
@@ -123,10 +139,44 @@ def main() -> None:
         lpips_weight = st.slider("LPIPS weight", 0.0, 5.0, step=0.1, key="lpips_weight")
         lpips_net = st.selectbox("LPIPS backbone", options=["alex", "vgg", "squeeze"], key="lpips_net")
         tv_weight = st.slider("TV weight", 0.0, 0.2, step=0.01, key="tv_weight")
+
+    st.subheader("Performance / Memory")
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        optimize_max_side = st.slider(
+            "Optimization max side (px)",
+            min_value=384,
+            max_value=1536,
+            step=64,
+            key="optimize_max_side",
+        )
+    with p2:
+        lpips_input_size = st.slider(
+            "LPIPS input size (px)",
+            min_value=128,
+            max_value=384,
+            step=32,
+            key="lpips_input_size",
+        )
+    with p3:
+        mixed_precision = st.checkbox("Mixed precision (CUDA)", key="mixed_precision")
     st.caption("Learning rate is fixed to 0.03 in this demo to keep preset behavior stable.")
+    st.caption(
+        f"torch={torch.__version__}, cuda_available={torch.cuda.is_available()}, torch_cuda={torch.version.cuda}"
+    )
+    st.caption(
+        "If you hit CUDA OOM, lower Optimization max side first, then LPIPS input size."
+    )
 
     run = st.button("Generate")
     if not run:
+        return
+
+    if device_mode == "cuda" and not torch.cuda.is_available():
+        st.error(
+            "Compute device is set to CUDA, but this Python environment cannot use CUDA. "
+            "Please install a CUDA-enabled torch build or switch device to auto/cpu."
+        )
         return
 
     if victim_file is None:
@@ -154,6 +204,10 @@ def main() -> None:
         tv_weight=tv_weight,
         clip_input_size=clip_input_size,
         lpips_net=lpips_net,
+        device=device_mode,
+        optimize_max_side=optimize_max_side,
+        lpips_input_size=lpips_input_size,
+        mixed_precision=mixed_precision,
     )
 
     progress = st.progress(0)

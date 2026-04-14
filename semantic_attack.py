@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -97,6 +98,39 @@ class AttackConfig:
     log_every: int = 25
     clip_model_id: str = "openai/clip-vit-large-patch14"
     lpips_net: str = "alex"
+    device: str = "auto"
+    optimize_max_side: int = 1024
+    lpips_input_size: int = 256
+    mixed_precision: bool = True
+
+
+def _resolve_device(device_pref: str) -> torch.device:
+    pref = device_pref.lower()
+    if pref == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if pref == "cpu":
+        return torch.device("cpu")
+    if pref == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        raise RuntimeError(
+            "CUDA is selected, but torch cannot use CUDA on this environment. "
+            "Install a CUDA-enabled torch build and ensure an up-to-date NVIDIA driver."
+        )
+    raise ValueError(f"Unknown device preference: {device_pref}. Use one of: auto, cuda, cpu.")
+
+
+def _resize_hw_keep_aspect(size_hw: Tuple[int, int], max_side: int) -> Tuple[int, int]:
+    h, w = size_hw
+    if max_side <= 0:
+        return h, w
+    longest = max(h, w)
+    if longest <= max_side:
+        return h, w
+    scale = max_side / float(longest)
+    nh = max(1, int(round(h * scale)))
+    nw = max(1, int(round(w * scale)))
+    return nh, nw
 
 
 def _to_tensor(img: Image.Image, size_hw: Tuple[int, int], device: torch.device) -> torch.Tensor:
@@ -145,7 +179,10 @@ def semantic_attack(
     config: AttackConfig,
     progress_cb=None,
 ) -> Tuple[Image.Image, Dict[str, float]]:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _resolve_device(config.device)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    use_amp = config.mixed_precision and device.type == "cuda"
     extractor = CLIPFeatureExtractor(config.clip_model_id).to(device)
     lpips_model: Optional[torch.nn.Module] = None
     if config.lpips_weight > 0:
@@ -153,7 +190,9 @@ def semantic_attack(
 
     # Always process in victim resolution.
     victim_w, victim_h = victim_img.size
-    target_size = (victim_h, victim_w)
+    orig_size = (victim_h, victim_w)
+    target_size = _resize_hw_keep_aspect(orig_size, config.optimize_max_side)
+    lpips_size = _resize_hw_keep_aspect(target_size, config.lpips_input_size)
     victim = _to_tensor(victim_img, target_size, device)
     if len(semantic_imgs) == 0:
         raise ValueError("At least one semantic image is required.")
@@ -169,37 +208,74 @@ def semantic_attack(
 
     optimizer = torch.optim.Adam([adv], lr=config.lr)
     with torch.no_grad():
-        semantic_feats = [
-            extractor.encode(semantic_tensor, config.clip_input_size)
-            for semantic_tensor in semantic_tensors
-        ]
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if use_amp
+            else nullcontext()
+        )
+        with amp_ctx:
+            semantic_feats = [
+                extractor.encode(semantic_tensor, config.clip_input_size)
+                for semantic_tensor in semantic_tensors
+            ]
         semantic_feat = torch.stack(semantic_feats, dim=0).mean(dim=0)
 
     last_losses: Dict[str, float] = {}
     for step in range(1, config.steps + 1):
-        optimizer.zero_grad()
-        adv_clamped = adv.clamp(0.0, 1.0)
-        adv_feat = extractor.encode(adv_clamped, config.clip_input_size)
+        optimizer.zero_grad(set_to_none=True)
+        try:
+            amp_ctx = (
+                torch.autocast(device_type="cuda", dtype=torch.float16)
+                if use_amp
+                else nullcontext()
+            )
+            with amp_ctx:
+                adv_clamped = adv.clamp(0.0, 1.0)
+                adv_feat = extractor.encode(adv_clamped, config.clip_input_size)
 
-        cosine = F.cosine_similarity(adv_feat, semantic_feat, dim=-1).mean()
-        semantic_loss = 1.0 - cosine
-        preserve_loss = F.mse_loss(adv_clamped, victim)
-        ssim_val = ssim_score(adv_clamped, victim, ssim_kernel)
-        ssim_loss = 1.0 - ssim_val
-        lpips_loss = torch.tensor(0.0, device=device)
-        if lpips_model is not None:
-            lpips_loss = lpips_model(_lpips_input(adv_clamped), _lpips_input(victim)).mean()
-        tv_loss = total_variation(adv_clamped)
+                cosine = F.cosine_similarity(adv_feat, semantic_feat, dim=-1).mean()
+                semantic_loss = 1.0 - cosine
+                preserve_loss = F.mse_loss(adv_clamped, victim)
+                ssim_val = ssim_score(adv_clamped, victim, ssim_kernel)
+                ssim_loss = 1.0 - ssim_val
+                lpips_loss = torch.tensor(0.0, device=device)
+                if lpips_model is not None:
+                    lpips_adv = adv_clamped
+                    lpips_ref = victim
+                    if lpips_size != target_size:
+                        lpips_adv = F.interpolate(
+                            lpips_adv,
+                            size=lpips_size,
+                            mode="bilinear",
+                            align_corners=False,
+                            antialias=True,
+                        )
+                        lpips_ref = F.interpolate(
+                            lpips_ref,
+                            size=lpips_size,
+                            mode="bilinear",
+                            align_corners=False,
+                            antialias=True,
+                        )
+                    lpips_loss = lpips_model(_lpips_input(lpips_adv), _lpips_input(lpips_ref)).mean()
+                tv_loss = total_variation(adv_clamped)
 
-        loss = (
-            config.semantic_weight * semantic_loss
-            + config.preserve_weight * preserve_loss
-            + config.ssim_weight * ssim_loss
-            + config.lpips_weight * lpips_loss
-            + config.tv_weight * tv_loss
-        )
-        loss.backward()
-        optimizer.step()
+                loss = (
+                    config.semantic_weight * semantic_loss
+                    + config.preserve_weight * preserve_loss
+                    + config.ssim_weight * ssim_loss
+                    + config.lpips_weight * lpips_loss
+                    + config.tv_weight * tv_loss
+                )
+            loss.backward()
+            optimizer.step()
+        except torch.OutOfMemoryError as exc:
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            raise RuntimeError(
+                "CUDA out of memory. Try lowering 'Optimization max side' and 'LPIPS input size', "
+                "or switch to Fast Preview / CPU."
+            ) from exc
 
         with torch.no_grad():
             perturb = (adv - victim).clamp(-config.eps, config.eps)
