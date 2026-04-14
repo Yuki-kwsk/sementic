@@ -13,6 +13,8 @@ Current settings:
 The optimization uses:
 - Semantic loss: cosine distance between CLIP image embeddings
 - Preserve loss: MSE to keep appearance close to victim image
+- SSIM loss: `1 - SSIM` to preserve structural similarity
+- LPIPS loss: perceptual similarity regularization
 - TV loss: smoothness regularization
 - Epsilon constraint: perturbation is clipped within `eps`
 
@@ -33,3 +35,13 @@ streamlit run app.py
 Upload:
 1. Semantic images (1 to 10 files)
 2. Victim image (1 file)
+
+## Recommended presets
+
+The UI includes presets that set all optimization parameters at once:
+- `Balanced (Recommended)`: best default for most images
+- `Semantic Strong`: stronger semantic transfer with more visible edits
+- `Natural Strong`: better visual fidelity to victim image
+- `Fast Preview`: quick trial settings for iterative experiments
+
+You can apply a preset first, then fine-tune sliders manually.
